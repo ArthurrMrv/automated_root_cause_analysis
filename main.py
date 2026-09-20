@@ -125,6 +125,7 @@ def parse_args():
     parser.add_argument("--tdelta", type=int, default=0, help="Specify $t_delta$ to simulate delay in anomaly detection")
     parser.add_argument("--test", action="store_true", help="Perform smoke test on certain methods without fully run on all data")
     parser.add_argument("--report-chance", action="store_true", help="Also print the Avg@5 a random ranking would reach, and the lift over it")
+    parser.add_argument("--output", type=str, default="output", help="Directory for per-case result JSON")
     args = parser.parse_args()
 
     # checked before the globals() lookup so the message also appears when the
@@ -221,7 +222,7 @@ if args.test is True:
 # prepare output paths
 from tempfile import TemporaryDirectory
 # output_path = TemporaryDirectory().name
-output_path = "output"
+output_path = args.output
 report_path = join(output_path, f"report.xlsx")
 result_path = join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
