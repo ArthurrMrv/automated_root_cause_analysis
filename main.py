@@ -293,10 +293,16 @@ def process(data_path):
 
     data_dir = dirname(data_path)
 
-    service, metric = basename(dirname(dirname(data_path))).split("_")
+    # "<service>_<fault>", optionally with a batch suffix: RE3-TT records a
+    # second run of the same fault as "ts-route-service_f3_1" alongside
+    # "ts-route-service_f3", so the fault is the second token, not everything
+    # after the service. The suffix stays in the result filename, which would
+    # otherwise collide with the first batch -- both number their cases from 1.
+    fault_dir = basename(dirname(dirname(data_path)))
+    service, metric = fault_dir.split("_")[:2]
     case = basename(dirname(data_path))
 
-    rp = join(result_path, f"{service}_{metric}_{case}.json")
+    rp = join(result_path, f"{fault_dir}_{case}.json")
 
     # == Load and Preprocess data ==
     data = pd.read_csv(data_path)
@@ -434,7 +440,7 @@ def process(data_path):
         raise e
         print(f"{args.method=} failed on {data_path=}")
         print(e)
-        rp = join(result_path, f"{service}_{metric}_{case}_failed.json")
+        rp = join(result_path, f"{fault_dir}_{case}_failed.json")
         with open(rp, "w") as f:
             json.dump({"error": str(e)}, f)
 
