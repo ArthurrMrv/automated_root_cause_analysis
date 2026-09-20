@@ -173,7 +173,11 @@ def _case_rows(case):
 
 
 def case_table(datasets, length=20, limit=None, cache=True, root=None):
-    """The one table: one row per (case, metric), cached under out/."""
+    """The one table: one row per (case, metric), cached under out/.
+
+    `cache=False` (--no-cache) forces a full recompute and *refreshes* the
+    cache, so the next run picks up the rebuilt table rather than a stale one.
+    """
     OUT.mkdir(exist_ok=True)
     path = OUT / f"table_{'-'.join(datasets)}_{length}_{limit or 'all'}.csv.gz"
     if cache and path.exists():
@@ -186,7 +190,7 @@ def case_table(datasets, length=20, limit=None, cache=True, root=None):
         print(f"{dataset}: {len({r['case'] for r in rows})} cases, {len(rows)} rows so far")
 
     table = pd.DataFrame(rows)
-    if cache:
+    if root is None:  # a --root debug run is not the real dataset, never cache it
         table.to_csv(path, index=False)
         print("wrote", path)
     return table
@@ -281,7 +285,8 @@ def argparser(description):
                         help="datasets to run, downloaded on first use")
     parser.add_argument("--length", type=int, default=20, help="window length in minutes")
     parser.add_argument("--limit", type=int, default=None, help="cases per dataset (debug)")
-    parser.add_argument("--no-cache", action="store_true", help="rebuild the table")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="full recompute: rebuild the table and refresh the cache")
     parser.add_argument("--root", default=None,
                         help="read cases from this directory instead of the dataset (debug)")
     return parser

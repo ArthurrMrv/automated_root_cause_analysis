@@ -65,16 +65,6 @@ if is_py310() or is_py312() or is_py314():
         ],
         # the reproduction variant of PRISM: same paper, the unspecified gaps
         # filled differently (see the module docstring)
-        "prismv2": [
-            "prismv2",
-            "prismv2_conjunctive",
-            "prismv2_external",
-            "prismv2_internal",
-            "prismv2_iqr",
-            "prismv2_marginal",
-            "prismv2_mean",
-            "prismv2_sum",
-        ],
         "rclagent": ["rclagent", "rclagent_geg", "rclagent_rldr"],
         # report.md add-on stack layered on PRISM: MARS -> TG-FI -> LSTR /
         # DTE-RWR -> PAVE-RCA, one module per architecture
