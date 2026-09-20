@@ -85,6 +85,14 @@ if is_py312() or is_py314():
         "prism_marginal",
         "prism_mean",
         "prism_sum",
+        "prismv2",
+        "prismv2_conjunctive",
+        "prismv2_external",
+        "prismv2_internal",
+        "prismv2_iqr",
+        "prismv2_marginal",
+        "prismv2_mean",
+        "prismv2_sum",
         "mars",
         "tgfi",
         "lstr",
@@ -135,7 +143,11 @@ def parse_args():
         exit(1)
 
     if args.method not in globals():
-        raise ValueError(f"{args.method=} not defined. Please check imported methods.")
+        reason = getattr(globals().get("e2e"), "IMPORT_ERRORS", {}).get(args.method)
+        raise ValueError(
+            f"{args.method=} not defined. Please check imported methods."
+            + (f" Its module failed to import -- {reason}" if reason else "")
+        )
 
     return args
 
@@ -632,7 +644,16 @@ for name, s_evaluator, f_evaluator in [
         name = "disk"
 
     if s_evaluator.average(5) is not None:
-        print( f"Avg@5-{name.upper()}:".ljust(12), round(s_evaluator.average(5), 2))
+        # AC@1..AC@5 alongside Avg@5: the gap between AC@1 and AC@5 says whether the
+        # remaining headroom is inside the top-5 (promote a candidate already there)
+        # or below it (a wider shortlist is the only thing that can reach it)
+        print(
+            f"Avg@5-{name.upper()}:".ljust(12),
+            round(s_evaluator.average(5), 2),
+            f" (AC@1 {s_evaluator.accuracy(1):.2f}"
+            f"  AC@3 {s_evaluator.accuracy(3):.2f}"
+            f"  AC@5 {s_evaluator.accuracy(5):.2f})",
+        )
         if args.report_chance:
             print_chance(s_evaluator, suffix=f"-{name.upper()}")
 
