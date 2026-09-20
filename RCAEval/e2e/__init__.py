@@ -96,10 +96,14 @@ if is_py310() or is_py312() or is_py314():
         "torai": ["torai"],
         "eventadl": ["eventadl"],
     }
+    # why each unavailable method is unavailable, keyed by method name, so the
+    # caller can say more than "not defined" (main.py reads it)
+    IMPORT_ERRORS = {}
     for _module, _names in _METHOD_MODULES.items():
         try:
             _mod = importlib.import_module(f".{_module}", __name__)
-        except Exception:
+        except Exception as _error:
+            IMPORT_ERRORS.update({_name: f"{type(_error).__name__}: {_error}" for _name in _names})
             continue
         for _name in _names:
             globals()[_name] = getattr(_mod, _name)
