@@ -21,12 +21,14 @@ def parse_scores(text):
 def run(method, dataset, extra):
     out = join("output", method)
     cmd = [
-        sys.executable, join(ROOT, "main.py"),
+        sys.executable, "-u", join(ROOT, "main.py"),
         "--method", method, "--dataset", dataset, "--output", out,
         *extra,
     ]
     print(f"\n=== {method} ===", flush=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=ROOT)
+    # stderr stays on the terminal: tqdm repaints its bar with "\r", and reading
+    # that through a text-mode pipe turns every repaint into a separate line
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, cwd=ROOT)
     buf = []
     for line in proc.stdout:
         sys.stdout.write(line)
