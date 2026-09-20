@@ -16,6 +16,14 @@ footnote of Table 5.
 
 The paper ships no reference implementation; every value it left unspecified is
 marked `# gap N:` below and tabulated in the reproduction notes.
+
+v2 keeps every specified part of the paper identical to `prism.py` and only
+revisits the gaps that were distorting the ranking rather than filling it:
+the zero-scale fallback (gap 5) no longer scores a property in raw units and
+never lets epsilon stand in for a scale,
+preprocessing runs once over the whole frame instead of once per window, and
+pooling is NaN-safe. `diagnostics` in the returned dict reports how often each
+of those fired, per case.
 """
 
 import warnings
@@ -45,7 +53,27 @@ SCORERS = ("zscore", "iqr")
 POOLINGS = ("max", "mean", "sum")
 COMBINERS = ("additive", "conjunctive", "internal", "external", "marginal")
 
-_POOL_FUNCS = {"max": np.max, "mean": np.mean, "sum": np.sum}
+# gap 5: floor on s(theta), as a fraction of the property's own centre, so a
+# near-constant reference window cannot turn a small absolute move into a
+# six-figure score. Binds only in that degenerate regime.
+SCALE_FLOOR = 0.01
+# A property constant at zero has no scale at all: centre and spread are both 0,
+# so no fallback derived from the property itself exists. SCALE_EPSILON only
+# keeps the division finite -- it is never allowed to *be* the scale, because a
+# 1e-9 denominator turns any move into a score no real anomaly can reach. The
+# score it produces is replaced by NEW_ACTIVITY_PERCENTILE of the scores of the
+# properties that do have a scale: a metric silent until the fault is new
+# activity, which ranks near the top of this case without deciding it alone.
+SCALE_EPSILON = 1e-9
+NEW_ACTIVITY_PERCENTILE = 99
+
+# NaN-safe: a single NaN would otherwise poison the pooled score and put the
+# component in an arbitrary place in the ranking
+_POOL_FUNCS = {"max": np.nanmax, "mean": np.nanmean, "sum": np.nansum}
+# gap 1: the paper does not say how the post-fault window is aggregated over
+# time. max is the default; p90 is the same statistic made robust to a single
+# spike, and mean/sum are much less window-length dependent.
+_TIME_AGGS = dict(_POOL_FUNCS, p90=lambda a, axis: np.nanpercentile(a, 90, axis=axis))
 
 
 def _split_property(column: str) -> tuple[str, str]:
@@ -79,28 +107,53 @@ def _deviation_scores(
 
     `c` and `s` are estimated on the pre-fault reference window (gap 2); the
     post-fault observations are then aggregated over time by `time_agg` (gap 1).
-    Returns a Series indexed by column name.
+    Returns (Series indexed by column name, counts of each scale fallback).
     """
     reference = normal.to_numpy(dtype=float)
     observed = anomal.to_numpy(dtype=float)
 
     if scorer == "zscore":
-        center = reference.mean(axis=0)
-        scale = reference.std(axis=0)
+        center = np.nanmean(reference, axis=0)
+        scale = np.nanstd(reference, axis=0)
     else:  # "iqr", as in BARO: RobustScaler's median / interquartile range
-        q25, q50, q75 = np.percentile(reference, [25, 50, 75], axis=0)
+        q25, q50, q75 = np.nanpercentile(reference, [25, 50, 75], axis=0)
         center = q50
         scale = q75 - q25
 
-    # gap 5: Definition 3.1 requires s > 0. A property constant across the
-    # reference window has s = 0; fall back to 1.0, as sklearn's StandardScaler
-    # and RobustScaler do for zero-variance features (so PRISM and the BARO
-    # baseline treat degenerate columns identically).
-    scale = np.where(scale > 0, scale, 1.0)
+    # gap 5: Definition 3.1 requires s > 0, and what replaces a zero s is the
+    # single largest lever on the ranking. Falling back to 1.0 (sklearn's rule
+    # for zero-variance features) scores the property in its raw units, so a
+    # byte-valued metric with a flat baseline outranks every properly scaled
+    # one. Fall back instead to information still about this property: the
+    # reference std when a robust scale collapses, then a floor relative to the
+    # property's own centre, then an absolute epsilon.
+    std = np.nanstd(reference, axis=0)
+    from_std = (scale <= 0) & (std > 0)
+    scale = np.where(scale > 0, scale, std)
+    floor = SCALE_FLOOR * np.abs(center)
+    floored = scale < floor
+    scale = np.maximum(scale, floor)
+    scaleless = scale <= 0
+    scale = np.where(scaleless, SCALE_EPSILON, scale)
 
     # gap 8: |x - c|, per Definition 3.1. BARO uses the signed deviation instead.
-    scores = np.abs(observed - center) / scale
-    return pd.Series(time_agg(scores, axis=0), index=normal.columns)
+    scores = time_agg(np.abs(observed - center) / scale, axis=0)
+    # epsilon is not a scale: cap what it produced at the level the properties
+    # that do have a scale reach in this case. A property that stayed at zero
+    # scores 0 and `minimum` leaves it there.
+    capped = np.zeros_like(scaleless)
+    if scaleless.any():
+        scaled = scores[~scaleless]
+        cap = float(np.nanpercentile(scaled, NEW_ACTIVITY_PERCENTILE)) if scaled.size else 0.0
+        capped = scaleless & (scores > cap)
+        scores = np.where(scaleless, np.minimum(scores, cap), scores)
+    counts = {
+        "scale_from_std": int(from_std.sum()),
+        "scale_floored": int(floored.sum()),
+        "scale_epsilon": int(scaleless.sum()),
+        "score_capped_to_new_activity": int(capped.sum()),
+    }
+    return pd.Series(scores, index=normal.columns), counts
 
 
 def _combine(internal_score: float, external_score: float, combine: str) -> float:
@@ -140,10 +193,11 @@ def _rank_components(
     grouped: dict[str, dict[str, list[tuple[str, float]]]],
     pool: Callable[..., float],
     combine: str,
-) -> list[tuple[str, float]]:
+) -> list[tuple[str, float, float]]:
     """Pool into S^I and S^E (Sec 3.2), then score and rank components (Sec 3.3).
 
-    Returns [(witness column, root cause score)], highest score first.
+    Returns [(witness column, root cause score, S^E)], highest score first;
+    S^E breaks ties, which `sorted` would otherwise resolve by column order.
     """
     ranked = []
     for properties in grouped.values():
@@ -161,9 +215,9 @@ def _rank_components(
         # gap 6: name the component's most deviant property, so RCAEval's
         # service-level and metric-level evaluators both read the rank correctly.
         witness = max(everything, key=lambda x: x[1])[0]
-        ranked.append((witness, root_cause_score))
+        ranked.append((witness, root_cause_score, external_score))
 
-    return sorted(ranked, key=lambda x: x[1], reverse=True)
+    return sorted(ranked, key=lambda x: (x[1], x[2]), reverse=True)
 
 
 def prism(
@@ -195,9 +249,11 @@ def prism(
             and "marginal" are the Table 6 ablations.
 
     Returns:
-        {"node_names": [...], "ranks": [...]} where each rank is
-        "<component>_<most deviant property of that component>", ordered by
-        decreasing root cause score.
+        {"node_names": [...], "ranks": [...], "diagnostics": {...}} where each
+        rank is "<component>_<most deviant property of that component>",
+        ordered by decreasing root cause score, one entry per component.
+        `diagnostics` reports the gap-filling that fired on this case: columns
+        dropped, unclassified properties, scale fallbacks and NaN columns.
     """
     if scorer not in SCORERS:
         raise ValueError(f"{scorer=} must be one of {SCORERS}")
@@ -206,8 +262,8 @@ def prism(
     if combine not in COMBINERS:
         raise ValueError(f"{combine=} must be one of {COMBINERS}")
     time_agg = kwargs.get("time_agg", "max")
-    if time_agg not in POOLINGS:
-        raise ValueError(f"{time_agg=} must be one of {POOLINGS}")
+    if time_agg not in _TIME_AGGS:
+        raise ValueError(f"{time_agg=} must be one of {tuple(_TIME_AGGS)}")
     if not isinstance(data, pd.DataFrame):
         raise TypeError(f"prism expects a metric DataFrame, got {type(data).__name__}")
     if anomalies is None:
@@ -215,45 +271,71 @@ def prism(
             raise ValueError("prism needs either inject_time or anomalies to split the windows")
         if "time" not in data.columns:
             raise ValueError("prism needs a 'time' column to split on inject_time")
-        normal_df = data[data["time"] < inject_time]
-        anomal_df = data[data["time"] >= inject_time]
+        is_normal = (data["time"] < inject_time).to_numpy()
     else:
-        normal_df = data.head(anomalies[0])
-        anomal_df = data.tail(len(data) - anomalies[0])
+        is_normal = np.arange(len(data)) < anomalies[0]
 
-    normal_df = preprocess(
-        data=normal_df, dataset=dataset, dk_select_useful=kwargs.get("dk_select_useful", False)
+    # Preprocess once over the whole frame, then split. Preprocessing each
+    # window separately is asymmetric: `drop_constant` sees a property that is
+    # flat before the fault and moves after it as constant in the reference
+    # window, so the column intersection then discards it -- the clearest root
+    # cause evidence there is.
+    frame = preprocess(
+        data=data, dataset=dataset, dk_select_useful=kwargs.get("dk_select_useful", False)
     )
-    anomal_df = preprocess(
-        data=anomal_df, dataset=dataset, dk_select_useful=kwargs.get("dk_select_useful", False)
-    )
+    normal_df, anomal_df = frame[is_normal], frame[~is_normal]
 
-    intersects = [x for x in normal_df.columns if x in anomal_df.columns]
-    normal_df = normal_df[intersects]
-    anomal_df = anomal_df[intersects]
+    # a property with no observation in a window has no score in that window
+    usable = normal_df.notna().any() & anomal_df.notna().any()
+    normal_df, anomal_df = normal_df.loc[:, usable], anomal_df.loc[:, usable]
+    columns = list(normal_df.columns)
 
-    if normal_df.empty or anomal_df.empty or not intersects:
+    if normal_df.empty or anomal_df.empty or not columns:
         raise ValueError(
-            f"prism needs non-empty pre- and post-fault windows over shared columns "
-            f"(got {len(normal_df)} and {len(anomal_df)} rows over {len(intersects)} columns)"
+            f"prism needs non-empty pre- and post-fault windows over observed columns "
+            f"(got {len(normal_df)} and {len(anomal_df)} rows over {len(columns)} columns)"
         )
 
     # Section 3.1: anomaly scoring
-    scores = _deviation_scores(normal_df, anomal_df, scorer, _POOL_FUNCS[time_agg])
+    scores, scale_counts = _deviation_scores(
+        normal_df, anomal_df, scorer, _TIME_AGGS[time_agg]
+    )
+    if not np.isfinite(scores.to_numpy()).all():
+        raise ValueError(
+            f"prism produced non-finite scores for "
+            f"{list(scores.index[~np.isfinite(scores.to_numpy())])[:5]}"
+        )
     grouped, unclassified = _group_by_component(scores)
     ranked = _rank_components(grouped, _POOL_FUNCS[pooling], combine)
 
+    # properties PRISM cannot classify are no evidence either way, but stay in
+    # the ranking after the scored components so the candidate set is fully
+    # covered -- unless their component is already ranked, which would put the
+    # same component in the list twice
+    scored = {_split_property(name)[0] for name, _, _ in ranked}
+    extra = [c for c in sorted(unclassified, key=lambda c: -scores[c])
+             if _split_property(c)[0] not in scored]
+    ranks = [name for name, _, _ in ranked] + extra
+
+    diagnostics = {
+        "n_columns": len(columns),
+        "n_components": len(grouped),
+        "n_dropped_by_preprocess": len(data.columns) - 1 - len(frame.columns),
+        "n_all_nan_in_a_window": int((~usable).sum()),
+        "n_unclassified": len(unclassified),
+        "unclassified_properties": sorted({_split_property(c)[1] for c in unclassified}),
+        **scale_counts,
+    }
+
     if kwargs.get("verbose") is True:
-        for name, score in ranked[:20]:
+        print(diagnostics)
+        for name, score, _ in ranked[:20]:
             print(f"{name}: {score:.2f}")
 
-    # properties PRISM cannot classify are no evidence either way, but stay in the
-    # ranking after the scored components so the candidate set is fully covered
-    ranks = [name for name, _ in ranked] + sorted(unclassified, key=lambda c: -scores[c])
-
     return {
-        "node_names": intersects,
+        "node_names": columns,
         "ranks": ranks,
+        "diagnostics": diagnostics,
     }
 
 
@@ -334,6 +416,19 @@ def prism_external(
     return prism(data, inject_time=inject_time, dataset=dataset, combine="external", **kwargs)
 
 
+# The functions above keep the paper's names, so this file stays diffable
+# against prism.py; RCAEval registers them under prismv2* (see e2e/__init__.py)
+# so `--method prism` and `--method prismv2` can be run side by side.
+prismv2 = prism
+prismv2_conjunctive = prism_conjunctive
+prismv2_external = prism_external
+prismv2_internal = prism_internal
+prismv2_iqr = prism_iqr
+prismv2_marginal = prism_marginal
+prismv2_mean = prism_mean
+prismv2_sum = prism_sum
+
+
 def _propagation_case(external_amplification: float) -> pd.DataFrame:
     """A fault propagating from `cartservice` to `frontend`.
 
@@ -353,6 +448,38 @@ def _propagation_case(external_amplification: float) -> pd.DataFrame:
     frame.loc[post, "cartservice_cpu"] += fault  # fault originates internally
     frame.loc[post, "cartservice_latency"] += fault  # and shows at the boundary
     frame.loc[post, "frontend_latency"] += fault * external_amplification
+    return frame
+
+
+def _flat_baseline_case() -> pd.DataFrame:
+    """A root cause whose internal property is flat until the fault hits it.
+
+    `cartservice_cpu` has zero variance across the reference window -- the case
+    gap 5 has to resolve, and the one per-window preprocessing would throw away.
+    `cartservice_gc` is a property PRISM cannot classify, and `adservice_mem`
+    carries a missing observation.
+    """
+    frame = _propagation_case(external_amplification=1.0)
+    n = len(frame)
+    post = frame["time"] >= n // 2
+    frame["cartservice_cpu"] = 5.0
+    frame.loc[post, "cartservice_cpu"] = 35.0
+    frame["cartservice_gc"] = np.arange(n, dtype=float)
+    frame.loc[0, "adservice_mem"] = np.nan
+    return frame
+
+
+def _zero_baseline_case() -> pd.DataFrame:
+    """A property flat *at zero* before the fault: no scale exists for it at all.
+
+    `adservice_error` is silent in the reference window and ticks up slightly
+    after it -- real but minor new activity. Divided by SCALE_EPSILON it would
+    score ~1e9 and hand the case to `adservice` over the actual root cause.
+    """
+    frame = _propagation_case(external_amplification=1.0)
+    post = frame["time"] >= len(frame) // 2
+    frame["adservice_error"] = 0.0
+    frame.loc[post, "adservice_error"] = 0.5
     return frame
 
 
@@ -383,16 +510,43 @@ def _demo() -> None:
     # -- and the reason the conjunctive scorer exists (Sec 3.3).
     assert top(prism, arbitrary)[0].startswith("frontend"), top(prism, arbitrary)
 
+    # == The gaps v2 revisits ==
+    flat = _flat_baseline_case()
+    out = prism(flat, inject_time=60, dataset="demo")
+    diagnostics = out["diagnostics"]
+
+    # preprocessing once keeps the flat-then-moving property, and it decides the
+    # case; preprocessing per window would have dropped it as constant
+    assert out["ranks"][0].startswith("cartservice"), out["ranks"]
+    # gap 5 resolved as a floor on the property's own centre, not as raw units
+    assert diagnostics["scale_floored"] == 1, diagnostics
+    assert diagnostics["scale_epsilon"] == 0, diagnostics
+    # unclassified properties are reported, and never duplicate their component
+    assert diagnostics["unclassified_properties"] == ["gc"], diagnostics
+    components = [r.split("_")[0] for r in out["ranks"]]
+    assert len(components) == len(set(components)) == 3, out["ranks"]
+    # a missing observation does not poison the pooled score (NaN-safe)
+    assert diagnostics["n_all_nan_in_a_window"] == 0, diagnostics
+
+    # a property flat at zero is new activity, capped at what the properties with
+    # a real scale reach -- not the ~1e9 that epsilon-as-scale would produce
+    zeroed = _zero_baseline_case()
+    out = prism(zeroed, inject_time=60, dataset="demo")
+    assert out["diagnostics"]["scale_epsilon"] == 1, out["diagnostics"]
+    assert out["diagnostics"]["score_capped_to_new_activity"] == 1, out["diagnostics"]
+    assert out["ranks"][0].startswith("cartservice"), out["ranks"]
+
     # == Every documented configuration produces a full, valid ranking ==
     for scorer in SCORERS:
         for pooling in POOLINGS:
             for combine in COMBINERS:
-                out = prism(
-                    bounded, inject_time=60, dataset="demo",
-                    scorer=scorer, pooling=pooling, combine=combine,
-                )
-                assert len(out["ranks"]) == 3, (scorer, pooling, combine, out["ranks"])
-                assert all("_" in r for r in out["ranks"]), out["ranks"]
+                for time_agg in _TIME_AGGS:
+                    out = prism(
+                        bounded, inject_time=60, dataset="demo", time_agg=time_agg,
+                        scorer=scorer, pooling=pooling, combine=combine,
+                    )
+                    assert len(out["ranks"]) == 3, (scorer, pooling, combine, out["ranks"])
+                    assert all("_" in r for r in out["ranks"]), out["ranks"]
 
     print("prism demo ok:", top(prism, bounded))
 
