@@ -62,6 +62,10 @@ DATASETS = {
 }
 ALL_DATASETS = list(DATASETS)
 
+# the fault tokens main.py evaluates; a "<service>_<fault>" directory whose tail
+# is not one of these is not a case directory and is skipped (loudly)
+FAULTS = frozenset({"cpu", "mem", "disk", "socket", "delay", "loss"})
+
 # M(S^I, S^E), Sec 3.3, plus the three replacements the study proposes
 COMBINERS = {
     "additive": lambda i, e: i + e - np.log1p(i + e),  # Eq (3), PRISM's default
@@ -106,7 +110,10 @@ def iter_cases(dataset, length=20, limit=None, root=None):
     n = length * 60 // 2
 
     for path in paths[:limit]:
-        service, fault = basename(dirname(dirname(path))).split("_")
+        service, _, fault = basename(dirname(dirname(path))).rpartition("_")
+        if fault not in FAULTS:  # not a case directory; main.py would crash here
+            print(f"{dataset}: skipping {path}, not a <service>_<fault> case")
+            continue
         with open(join(dirname(path), "inject_time.txt")) as f:
             inject_time = int(f.readlines()[0].strip())
 
