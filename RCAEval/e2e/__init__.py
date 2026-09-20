@@ -53,6 +53,24 @@ if is_py310() or is_py312() or is_py314():
         "microrank": ["microrank"],
         "easyrca": ["easyrca"],
         "pc_pagerank": ["cmlp_pagerank", "ntlr_pagerank", "pc_pagerank"],
+        "prism": [
+            "prism",
+            "prism_conjunctive",
+            "prism_external",
+            "prism_internal",
+            "prism_iqr",
+            "prism_marginal",
+            "prism_mean",
+            "prism_sum",
+        ],
+        "rclagent": ["rclagent", "rclagent_geg", "rclagent_rldr"],
+        # report.md add-on stack layered on PRISM: MARS -> TG-FI -> LSTR /
+        # DTE-RWR -> PAVE-RCA, one module per architecture
+        "mars": ["mars"],
+        "tgfi": ["tgfi"],
+        "lstr": ["lstr"],
+        "dterwr": ["dterwr"],
+        "pave": ["pave"],
         "pc_randomwalk": [
             "fci_randomwalk",
             "granger_randomwalk",
