@@ -239,12 +239,13 @@ report_path = join(output_path, f"report.xlsx")
 result_path = join(output_path, "results")
 os.makedirs(result_path, exist_ok=True)
 
-if "eventadl" in args.dataset:
-    # the eventadl datasets share service names and case ids, so stale result
-    # files from a previous run on another eventadl dataset would collide with
-    # (and leak into) this run's evaluation
-    for _rp in glob.glob(join(result_path, "*_event_*.json")):
-        os.remove(_rp)
+# every case is recomputed on every run (there is no resume), so anything
+# already in here is from an earlier run. Different datasets use different
+# service names, so those files do not get overwritten -- they survive and the
+# evaluation below, which globs the whole directory, scores them as if they
+# were part of this run.
+for _rp in glob.glob(join(result_path, "*.json")):
+    os.remove(_rp)
 
 
 def _eventadl_short_name(entity):

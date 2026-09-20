@@ -19,10 +19,11 @@ def parse_scores(text):
 
 
 def run(method, dataset, extra):
-    out = join("output", method)
+    # exactly the command you would type by hand, so a method scores the same
+    # here as it does on its own; -u only makes its stdout arrive live
     cmd = [
         sys.executable, "-u", join(ROOT, "main.py"),
-        "--method", method, "--dataset", dataset, "--output", out,
+        "--method", method, "--dataset", dataset,
         *extra,
     ]
     print(f"\n=== {method} ===", flush=True)
