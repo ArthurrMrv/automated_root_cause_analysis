@@ -8,7 +8,10 @@ import subprocess
 import sys
 from os.path import abspath, dirname, join
 
-FAULTS = ("CPU", "MEM", "DISK", "SOCKET", "DELAY", "LOSS")
+# RE1/RE2 fault types, in display order. RE3 reports code-level faults
+# (F1-F5) instead, so the columns come from what the run actually printed and
+# this is only the preferred order.
+FAULT_ORDER = ("CPU", "MEM", "DISK", "SOCKET", "DELAY", "LOSS")
 ROOT = dirname(abspath(__file__))
 
 
@@ -40,12 +43,14 @@ def run(method, dataset, extra):
 
 
 def print_table(dataset, rows):
+    reported = {f for _, scores, _, _ in rows for f in scores}
+    faults = [f for f in FAULT_ORDER if f in reported] + sorted(reported - set(FAULT_ORDER))
     name_w = max(6, *(len(r[0]) for r in rows))
-    cols = f"{{:<{name_w}}}  " + "  ".join(["{:>6}"] * 8)
+    cols = f"{{:<{name_w}}}  " + "  ".join(["{:>6}"] * (len(faults) + 2))
     print(f"\n--- Comparison ({dataset}) ---")
-    print(cols.format("method", *FAULTS, "avg", "speed"))
+    print(cols.format("method", *faults, "avg", "speed"))
     for name, scores, speed, ok in rows:
-        vals = [scores.get(f) for f in FAULTS]
+        vals = [scores.get(f) for f in faults]
         present = [v for v in vals if v is not None]
         avg = sum(present) / len(present) if present else None
         cells = [name] + [f"{v:.2f}" if v is not None else "-" for v in vals + [avg, speed]]

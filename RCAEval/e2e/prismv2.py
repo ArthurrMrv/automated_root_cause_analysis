@@ -19,7 +19,8 @@ marked `# gap N:` below and tabulated in the reproduction notes.
 
 v2 keeps every specified part of the paper identical to `prism.py` and only
 revisits the gaps that were distorting the ranking rather than filling it:
-the zero-scale fallback (gap 5) no longer scores a property in raw units,
+the zero-scale fallback (gap 5) no longer scores a property in raw units and
+never lets epsilon stand in for a scale,
 preprocessing runs once over the whole frame instead of once per window, and
 pooling is NaN-safe. `diagnostics` in the returned dict reports how often each
 of those fired, per case.
@@ -56,10 +57,15 @@ COMBINERS = ("additive", "conjunctive", "internal", "external", "marginal")
 # near-constant reference window cannot turn a small absolute move into a
 # six-figure score. Binds only in that degenerate regime.
 SCALE_FLOOR = 0.01
-# last resort for a property with no scale information at all (constant at
-# zero): kept tiny so it stays visible in `diagnostics` rather than silently
-# passing for a real scale.
+# A property constant at zero has no scale at all: centre and spread are both 0,
+# so no fallback derived from the property itself exists. SCALE_EPSILON only
+# keeps the division finite -- it is never allowed to *be* the scale, because a
+# 1e-9 denominator turns any move into a score no real anomaly can reach. The
+# score it produces is replaced by NEW_ACTIVITY_PERCENTILE of the scores of the
+# properties that do have a scale: a metric silent until the fault is new
+# activity, which ranks near the top of this case without deciding it alone.
 SCALE_EPSILON = 1e-9
+NEW_ACTIVITY_PERCENTILE = 99
 
 # NaN-safe: a single NaN would otherwise poison the pooled score and put the
 # component in an arbitrary place in the ranking
@@ -128,16 +134,26 @@ def _deviation_scores(
     floored = scale < floor
     scale = np.maximum(scale, floor)
     scaleless = scale <= 0
-    scale = np.where(scale > 0, scale, SCALE_EPSILON)
+    scale = np.where(scaleless, SCALE_EPSILON, scale)
 
     # gap 8: |x - c|, per Definition 3.1. BARO uses the signed deviation instead.
-    scores = np.abs(observed - center) / scale
+    scores = time_agg(np.abs(observed - center) / scale, axis=0)
+    # epsilon is not a scale: cap what it produced at the level the properties
+    # that do have a scale reach in this case. A property that stayed at zero
+    # scores 0 and `minimum` leaves it there.
+    capped = np.zeros_like(scaleless)
+    if scaleless.any():
+        scaled = scores[~scaleless]
+        cap = float(np.nanpercentile(scaled, NEW_ACTIVITY_PERCENTILE)) if scaled.size else 0.0
+        capped = scaleless & (scores > cap)
+        scores = np.where(scaleless, np.minimum(scores, cap), scores)
     counts = {
         "scale_from_std": int(from_std.sum()),
         "scale_floored": int(floored.sum()),
         "scale_epsilon": int(scaleless.sum()),
+        "score_capped_to_new_activity": int(capped.sum()),
     }
-    return pd.Series(time_agg(scores, axis=0), index=normal.columns), counts
+    return pd.Series(scores, index=normal.columns), counts
 
 
 def _combine(internal_score: float, external_score: float, combine: str) -> float:
@@ -453,6 +469,20 @@ def _flat_baseline_case() -> pd.DataFrame:
     return frame
 
 
+def _zero_baseline_case() -> pd.DataFrame:
+    """A property flat *at zero* before the fault: no scale exists for it at all.
+
+    `adservice_error` is silent in the reference window and ticks up slightly
+    after it -- real but minor new activity. Divided by SCALE_EPSILON it would
+    score ~1e9 and hand the case to `adservice` over the actual root cause.
+    """
+    frame = _propagation_case(external_amplification=1.0)
+    post = frame["time"] >= len(frame) // 2
+    frame["adservice_error"] = 0.0
+    frame.loc[post, "adservice_error"] = 0.5
+    return frame
+
+
 def _demo() -> None:
     """The paper's claims, as a runnable check, each under its stated condition."""
     top = lambda fn, frame: fn(frame, inject_time=60, dataset="demo")["ranks"]
@@ -497,6 +527,14 @@ def _demo() -> None:
     assert len(components) == len(set(components)) == 3, out["ranks"]
     # a missing observation does not poison the pooled score (NaN-safe)
     assert diagnostics["n_all_nan_in_a_window"] == 0, diagnostics
+
+    # a property flat at zero is new activity, capped at what the properties with
+    # a real scale reach -- not the ~1e9 that epsilon-as-scale would produce
+    zeroed = _zero_baseline_case()
+    out = prism(zeroed, inject_time=60, dataset="demo")
+    assert out["diagnostics"]["scale_epsilon"] == 1, out["diagnostics"]
+    assert out["diagnostics"]["score_capped_to_new_activity"] == 1, out["diagnostics"]
+    assert out["ranks"][0].startswith("cartservice"), out["ranks"]
 
     # == Every documented configuration produces a full, valid ranking ==
     for scorer in SCORERS:

@@ -518,18 +518,22 @@ eval_data = {
 
 s_evaluator_all = Evaluator()
 f_evaluator_all = Evaluator()
-s_evaluator_cpu = Evaluator()
-f_evaluator_cpu = Evaluator()
-s_evaluator_mem = Evaluator()
-f_evaluator_mem = Evaluator()
-s_evaluator_lat = Evaluator()
-f_evaluator_lat = Evaluator()
-s_evaluator_loss = Evaluator()
-f_evaluator_loss = Evaluator()
-s_evaluator_io = Evaluator()
-f_evaluator_io = Evaluator()
-s_evaluator_socket = Evaluator()
-f_evaluator_socket = Evaluator()
+
+# One (service, metric) evaluator pair per fault type, created on first use.
+# Naming the fault types here instead dropped every RE3 case: RE3 faults are
+# code-level (f1-f5), matched none of the RE1/RE2 names, and so were left out
+# of the printed totals entirely -- the whole result block came out empty.
+overall_evaluators = {}
+# ground-truth indicator, wherever it is not the fault name itself
+ANSWER_METRIC = {"delay": "latency", "loss": "latency", "disk": disk_metric}
+# RE1/RE2 faults print in this order; any other fault follows, sorted
+FAULT_ORDER = ("cpu", "mem", "disk", "socket", "delay", "loss")
+
+
+def overall_evaluator(fault):
+    """The (service, metric) evaluator pair aggregating every case of `fault`."""
+    return overall_evaluators.setdefault(fault, (Evaluator(), Evaluator()))
+
 
 for service in services:
     for fault in faults:
@@ -569,47 +573,14 @@ for service in services:
                 s_evaluator.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
                 f_evaluator.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, fault))
 
-                if fault == "cpu":
-                    s_evaluator_cpu.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_cpu.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, fault))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, fault))
-
-                elif fault == "mem":
-                    s_evaluator_mem.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_mem.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, fault))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, fault))
-
-                elif fault == "delay":
-                    s_evaluator_lat.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_lat.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "latency"))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "latency"))
-
-                elif fault == "loss":
-                    s_evaluator_loss.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_loss.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "latency"))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "latency"))
-
-                elif fault == "disk":
-                    s_evaluator_io.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_io.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, disk_metric))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, disk_metric))
-                elif fault == "socket":
-                    s_evaluator_socket.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_socket.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "socket"))
-
-                    s_evaluator_all.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
-                    f_evaluator_all.add_case(ranks=f_ranks, n_candidates=n_metric, answer=Node(service, "socket"))
-
+                answer = Node(service, ANSWER_METRIC.get(fault, fault))
+                s_evaluator_fault, f_evaluator_fault = overall_evaluator(fault)
+                for s_eval, f_eval in (
+                    (s_evaluator_fault, f_evaluator_fault),
+                    (s_evaluator_all, f_evaluator_all),
+                ):
+                    s_eval.add_case(ranks=s_ranks, n_candidates=n_service, answer=Node(service, "unknown"))
+                    f_eval.add_case(ranks=f_ranks, n_candidates=n_metric, answer=answer)
 
         eval_data["service-fault"].append(f"{service}_{fault}")
         eval_data["top_1_service"].append(s_evaluator.accuracy(1))
@@ -623,14 +594,10 @@ for service in services:
 
 
 print("--- Evaluation results ---")
-for name, s_evaluator, f_evaluator in [
-    ("cpu", s_evaluator_cpu, f_evaluator_cpu),
-    ("mem", s_evaluator_mem, f_evaluator_mem),
-    ("io", s_evaluator_io, f_evaluator_io),
-    ("socket", s_evaluator_socket, f_evaluator_socket),
-    ("delay", s_evaluator_lat, f_evaluator_lat),
-    ("loss", s_evaluator_loss, f_evaluator_loss),
-]:
+for name in [f for f in FAULT_ORDER if f in overall_evaluators] + sorted(
+    f for f in overall_evaluators if f not in FAULT_ORDER
+):
+    s_evaluator, f_evaluator = overall_evaluators[name]
     eval_data["service-fault"].append(f"overall_{name}")
     eval_data["top_1_service"].append(s_evaluator.accuracy(1))
     eval_data["top_3_service"].append(s_evaluator.accuracy(3))
@@ -640,9 +607,6 @@ for name, s_evaluator, f_evaluator in [
     eval_data["top_3_metric"].append(f_evaluator.accuracy(3))
     eval_data["top_5_metric"].append(f_evaluator.accuracy(5))
     eval_data["avg@5_metric"].append(f_evaluator.average(5))
-
-    if name == "io":
-        name = "disk"
 
     if s_evaluator.average(5) is not None:
         # AC@1..AC@5 alongside Avg@5: the gap between AC@1 and AC@5 says whether the
